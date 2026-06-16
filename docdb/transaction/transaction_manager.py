@@ -49,10 +49,14 @@ class Transaction:
         key = self.get_write_key(collection, doc_id)
         return self.write_set.get(key)
 
+    def is_in_write_set(self, collection: str, doc_id: DocumentID) -> bool:
+        key = self.get_write_key(collection, doc_id)
+        return key in self.write_set
+
     def add_to_read_set(self, collection: str, doc: Document) -> None:
         key = self.get_write_key(collection, doc.doc_id)
         if key not in self.read_set:
-            self.read_set[key] = doc
+            self.read_set[key] = doc.copy()
 
     def add_undo_action(self, action: Callable) -> None:
         self.undo_log.append(action)
@@ -69,14 +73,14 @@ class TransactionManager:
         self._lock = threading.RLock()
         self._transactions: Dict[int, Transaction] = {}
         self._document_stores: Dict[str, DocumentStore] = {}
-        self._mvcc_store: Dict[str, OrderedDict[int, Document]] = {}
+        self._mvcc_store: Dict[str, Dict[DocumentID, OrderedDict[int, Optional[Document]]]] = {}
         self._committed_txns: List[int] = []
 
     def register_collection(self, collection: str, store: DocumentStore) -> None:
         with self._lock:
             self._document_stores[collection] = store
             if collection not in self._mvcc_store:
-                self._mvcc_store[collection] = OrderedDict()
+                self._mvcc_store[collection] = {}
 
     def begin_transaction(self, isolation_level: IsolationLevel = IsolationLevel.REPEATABLE_READ) -> Transaction:
         txn_id = self.lock_manager.allocate_txn_id()
@@ -98,10 +102,12 @@ class TransactionManager:
             raise ValueError(f"Collection '{collection}' not found")
         return self._document_stores[collection]
 
-    def _get_mvcc_versions(self, collection: str) -> OrderedDict[int, Document]:
+    def _get_mvcc_versions(self, collection: str, doc_id: DocumentID) -> OrderedDict[int, Optional[Document]]:
         if collection not in self._mvcc_store:
-            self._mvcc_store[collection] = OrderedDict()
-        return self._mvcc_store[collection]
+            self._mvcc_store[collection] = {}
+        if doc_id not in self._mvcc_store[collection]:
+            self._mvcc_store[collection][doc_id] = OrderedDict()
+        return self._mvcc_store[collection][doc_id]
 
     def _get_visible_version(self, txn: Transaction, collection: str,
                              doc_id: DocumentID) -> Optional[Document]:
@@ -113,27 +119,27 @@ class TransactionManager:
                     if key in other_txn.write_set:
                         return other_txn.write_set[key]
 
-        written = txn.get_from_write_set(collection, doc_id)
-        if written:
-            return written
+        if txn.is_in_write_set(collection, doc_id):
+            return txn.get_from_write_set(collection, doc_id)
 
         if txn.isolation_level in (IsolationLevel.REPEATABLE_READ, IsolationLevel.SERIALIZABLE):
             key = txn.get_write_key(collection, doc_id)
             if key in txn.read_set:
                 return txn.read_set[key]
 
-        versions = self._get_mvcc_versions(collection)
-        doc_key = doc_id
+        versions = self._get_mvcc_versions(collection, doc_id)
 
-        committed_docs = []
+        committed_versions = []
         for version_txn_id, doc in versions.items():
-            if doc.doc_id == doc_key and version_txn_id in self._committed_txns:
-                if version_txn_id < txn.txn_id:
-                    committed_docs.append((version_txn_id, doc))
+            if version_txn_id in self._committed_txns and version_txn_id < txn.txn_id:
+                committed_versions.append((version_txn_id, doc))
 
-        if committed_docs:
-            committed_docs.sort(key=lambda x: x[0], reverse=True)
-            return committed_docs[0][1]
+        if committed_versions:
+            committed_versions.sort(key=lambda x: x[0], reverse=True)
+            latest_version = committed_versions[0][1]
+            if latest_version is not None and txn.isolation_level in (IsolationLevel.REPEATABLE_READ, IsolationLevel.SERIALIZABLE):
+                txn.add_to_read_set(collection, latest_version)
+            return latest_version
 
         store = self._get_store(collection)
         try:
@@ -152,6 +158,10 @@ class TransactionManager:
 
         if self.lock_manager.has_lock(txn.txn_id, collection, doc_id, lock_type):
             return
+
+        if lock_type == LockType.EXCLUSIVE:
+            if self.lock_manager.upgrade_lock(txn.txn_id, collection, doc_id):
+                return
 
         self.lock_manager.acquire_lock(txn.txn_id, collection, doc_id, lock_type)
 
@@ -328,6 +338,8 @@ class TransactionManager:
                         existing_doc = store.get(doc_id)
                         store.delete(doc_id)
                         self.index_manager.on_document_deleted(collection, existing_doc)
+                        versions = self._get_mvcc_versions(collection, doc_id)
+                        versions[txn.txn_id] = None
                     except DocumentNotFoundError:
                         pass
                 else:
@@ -342,7 +354,7 @@ class TransactionManager:
                         store.insert(doc)
                         self.index_manager.on_document_inserted(collection, doc)
 
-                    versions = self._get_mvcc_versions(collection)
+                    versions = self._get_mvcc_versions(collection, doc_id)
                     versions[txn.txn_id] = doc
 
             self.wal.commit_transaction(txn.txn_id)
@@ -392,14 +404,15 @@ class TransactionManager:
 
     def cleanup_old_versions(self, min_txn_id: int) -> None:
         with self._lock:
-            for collection, versions in self._mvcc_store.items():
-                to_remove = []
-                for txn_id in versions:
-                    if txn_id < min_txn_id and txn_id in self._committed_txns:
-                        to_remove.append(txn_id)
+            for collection, doc_versions in self._mvcc_store.items():
+                for doc_id, versions in doc_versions.items():
+                    to_remove = []
+                    for txn_id in versions:
+                        if txn_id < min_txn_id and txn_id in self._committed_txns:
+                            to_remove.append(txn_id)
 
-                for txn_id in to_remove:
-                    del versions[txn_id]
+                    for txn_id in to_remove:
+                        del versions[txn_id]
 
             if min_txn_id > 0:
                 self._committed_txns = [

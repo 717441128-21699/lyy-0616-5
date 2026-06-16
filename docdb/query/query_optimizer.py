@@ -83,10 +83,10 @@ class QueryOptimizer:
         self.transaction_manager = transaction_manager
         self._lock = threading.RLock()
 
-        self._full_scan_threshold_ratio = 0.3
-        self._index_cost_per_row = 1.5
+        self._full_scan_threshold_ratio = 1.5
+        self._index_cost_per_row = 0.5
         self._full_scan_cost_per_row = 1.0
-        self._random_io_cost = 10.0
+        self._random_io_cost = 3.0
         self._sequential_io_cost = 1.0
 
     def parse_query(self, query_dict: Dict[str, Any]) -> List[QueryCondition]:
@@ -174,7 +174,10 @@ class QueryOptimizer:
             return int(avg_per_key)
         elif condition.operator in (Operator.GT, Operator.GTE, Operator.LT, Operator.LTE):
             selectivity = stats.get('selectivity', 0)
-            return int(total_docs * 0.5 / max(selectivity, 0.01))
+            unique_keys = stats.get('unique_keys', total_docs)
+            if unique_keys > 0:
+                return int(total_docs / max(unique_keys, 1) * max(unique_keys * 0.3, 3))
+            return int(total_docs * 0.3)
         else:
             return total_docs
 

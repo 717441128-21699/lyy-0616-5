@@ -43,6 +43,15 @@ class Document:
         self.version += 1
         self.updated_at = time.time()
 
+    def copy(self) -> 'Document':
+        return Document(
+            doc_id=self.doc_id,
+            data=dict(self.data),
+            version=self.version,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
+
     def get_field(self, field_path: str) -> Optional[Any]:
         parts = field_path.split('.')
         value: Any = self.data

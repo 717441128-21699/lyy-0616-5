@@ -19,8 +19,10 @@ class BTreeNode(Generic[K, V]):
     def is_full(self, order: int) -> bool:
         return len(self.keys) >= order - 1
 
-    def split(self, order: int) -> 'BTreeNode[K, V]':
+    def split(self, order: int) -> Tuple['BTreeNode[K, V]', K, V]:
         mid = (order - 1) // 2
+        mid_key = self.keys[mid]
+        mid_value = self.values[mid]
         new_node = BTreeNode[K, V](
             keys=self.keys[mid + 1:],
             values=self.values[mid + 1:],
@@ -31,7 +33,7 @@ class BTreeNode(Generic[K, V]):
         self.values = self.values[:mid]
         if not self.is_leaf:
             self.children = self.children[:mid + 1]
-        return new_node
+        return new_node, mid_key, mid_value
 
 
 class BTree(Generic[K, V]):
@@ -102,18 +104,14 @@ class BTree(Generic[K, V]):
 
     def _split_child(self, parent: BTreeNode[K, V], child_idx: int) -> None:
         child = self._get_node(parent.children[child_idx])
-        new_child = child.split(self.order)
+        new_child, mid_key, mid_value = child.split(self.order)
         new_child.node_id = self._next_node_id
         self.nodes[self._next_node_id] = new_child
         self._next_node_id += 1
 
-        parent.keys.insert(child_idx, child.keys[-1])
-        parent.values.insert(child_idx, child.values[-1])
+        parent.keys.insert(child_idx, mid_key)
+        parent.values.insert(child_idx, mid_value)
         parent.children.insert(child_idx + 1, new_child.node_id)
-
-        if child.is_leaf:
-            child.keys.pop()
-            child.values.pop()
 
     def _insert_non_full(self, node: BTreeNode[K, V], key: K, value: V) -> None:
         i = len(node.keys) - 1
