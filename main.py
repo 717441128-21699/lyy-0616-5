@@ -5,8 +5,12 @@
 """
 
 import os
+import sys
 import shutil
 import json
+
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+
 from docdb import DocDB, Config, IsolationLevel
 
 
@@ -347,9 +351,9 @@ def main():
     └── api/             # 数据库API入口
 
 核心特性:
-  ✓ JSON文档存储        ✓ B树二级索引        ✓ WAL持久化
-  ✓ 多文档事务          ✓ MVCC隔离           ✓ 死锁检测/避免
-  ✓ 查询优化器          ✓ 崩溃恢复           ✓ 索引一致性保证
+  * JSON文档存储        * B树二级索引        * WAL持久化
+  * 多文档事务          * MVCC隔离           * 死锁检测/避免
+  * 查询优化器          * 崩溃恢复           * 索引一致性保证
 """)
 
     try:

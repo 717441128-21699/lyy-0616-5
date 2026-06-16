@@ -212,6 +212,31 @@ class TestDocDBIntegration(unittest.TestCase):
             self.assertEqual(d3.data["age"], 30)
             self.db.commit(txn)
 
+    def test_serializable_isolation(self):
+        """测试 SERIALIZABLE 隔离级别"""
+        users = self.db["users"]
+        doc = users.insert_one({"name": "串行化测试", "age": 25})
+
+        with self.db.transaction(IsolationLevel.SERIALIZABLE) as txn:
+            d = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            self.assertEqual(d.data["age"], 25)
+            self.db.commit(txn)
+
+        with self.db.transaction(IsolationLevel.SERIALIZABLE) as txn:
+            d1 = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            self.assertEqual(d1.data["age"], 25)
+            d2 = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            self.assertEqual(d2.data["age"], 25)
+            self.db.commit(txn)
+
+        with self.db.transaction(IsolationLevel.SERIALIZABLE) as txn:
+            d = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            self.db._transaction_manager.update_document(txn, "users", doc.doc_id, {"age": 30})
+            self.db.commit(txn)
+
+        doc2 = users.find_one(doc.doc_id)
+        self.assertEqual(doc2.data["age"], 30)
+
     def test_concurrent_transactions(self):
         """测试并发事务"""
         from docdb.common import TransactionAbortedError
@@ -220,12 +245,14 @@ class TestDocDBIntegration(unittest.TestCase):
         counter.insert_one({"name": "count", "value": 0})
         success_count = [0]
         success_lock = threading.Lock()
+        num_threads = 5
+        iterations = 20
 
-        def increment(n):
-            for _ in range(n):
-                for attempt in range(50):
+        def increment():
+            for _ in range(iterations):
+                for attempt in range(100):
                     try:
-                        with self.db.transaction(IsolationLevel.REPEATABLE_READ) as txn:
+                        with self.db.transaction(IsolationLevel.SERIALIZABLE) as txn:
                             doc = counter.find({"name": "count"})[0]
                             new_val = doc.data["value"] + 1
                             self.db._transaction_manager.update_document(
@@ -236,12 +263,12 @@ class TestDocDBIntegration(unittest.TestCase):
                                 success_count[0] += 1
                         break
                     except TransactionAbortedError:
-                        time.sleep(0.01 * attempt)
+                        time.sleep(0.001 * attempt)
                         continue
 
         threads = []
-        for i in range(5):
-            t = threading.Thread(target=increment, args=(20,))
+        for i in range(num_threads):
+            t = threading.Thread(target=increment)
             threads.append(t)
             t.start()
 
@@ -249,8 +276,8 @@ class TestDocDBIntegration(unittest.TestCase):
             t.join()
 
         doc = counter.find({"name": "count"})[0]
-        self.assertLessEqual(doc.data["value"], success_count[0])
-        self.assertGreater(success_count[0], 80)
+        self.assertEqual(doc.data["value"], success_count[0])
+        self.assertEqual(success_count[0], num_threads * iterations)
 
     def test_multiple_collections(self):
         """测试多个集合"""

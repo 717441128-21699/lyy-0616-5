@@ -152,7 +152,7 @@ class TransactionManager:
 
     def _acquire_document_lock(self, txn: Transaction, collection: str,
                                doc_id: DocumentID, lock_type: LockType) -> None:
-        if txn.isolation_level in (IsolationLevel.READ_COMMITTED, IsolationLevel.READ_UNCOMMITTED):
+        if txn.isolation_level in (IsolationLevel.READ_COMMITTED, IsolationLevel.READ_UNCOMMITTED, IsolationLevel.REPEATABLE_READ):
             if lock_type == LockType.SHARED:
                 return
 
@@ -309,10 +309,9 @@ class TransactionManager:
             parts = key.split(':', 1)
             collection, doc_id = parts[0], parts[1]
 
-            versions = self._get_mvcc_versions(collection)
+            versions = self._get_mvcc_versions(collection, doc_id)
             for version_txn_id, version_doc in versions.items():
-                if version_doc.doc_id == doc_id and \
-                        version_txn_id > txn.txn_id and \
+                if version_txn_id > txn.txn_id and \
                         version_txn_id in self._committed_txns:
                     return False
 
