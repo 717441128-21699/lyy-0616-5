@@ -23,59 +23,85 @@ class Collection:
         self.db = db
         self._store = db._document_stores[name]
 
-    def insert_one(self, data: Dict[str, Any]) -> Document:
-        with self.db.transaction() as txn:
-            doc = self.db._transaction_manager.insert_document(txn, self.name, data)
-            self.db._transaction_manager.commit_transaction(txn)
+    def insert_one(self, data: Dict[str, Any], txn: Optional[Transaction] = None) -> Document:
+        if txn is not None:
+            return self.db._transaction_manager.insert_document(txn, self.name, data)
+        with self.db.transaction() as txn_inner:
+            doc = self.db._transaction_manager.insert_document(txn_inner, self.name, data)
+            self.db._transaction_manager.commit_transaction(txn_inner)
             return doc
 
-    def insert_many(self, data_list: List[Dict[str, Any]]) -> List[Document]:
-        with self.db.transaction() as txn:
+    def insert_many(self, data_list: List[Dict[str, Any]], txn: Optional[Transaction] = None) -> List[Document]:
+        if txn is not None:
             docs = []
             for data in data_list:
                 doc = self.db._transaction_manager.insert_document(txn, self.name, data)
                 docs.append(doc)
-            self.db._transaction_manager.commit_transaction(txn)
+            return docs
+        with self.db.transaction() as txn_inner:
+            docs = []
+            for data in data_list:
+                doc = self.db._transaction_manager.insert_document(txn_inner, self.name, data)
+                docs.append(doc)
+            self.db._transaction_manager.commit_transaction(txn_inner)
             return docs
 
-    def find_one(self, doc_id: DocumentID) -> Optional[Document]:
+    def find_one(self, doc_id: DocumentID, txn: Optional[Transaction] = None) -> Optional[Document]:
+        if txn is not None:
+            return self.db._transaction_manager.read_document(txn, self.name, doc_id)
         try:
-            with self.db.transaction() as txn:
-                doc = self.db._transaction_manager.read_document(txn, self.name, doc_id)
-                return doc
+            with self.db.transaction() as txn_inner:
+                    doc = self.db._transaction_manager.read_document(txn_inner, self.name, doc_id)
+                    return doc
         except DocumentNotFoundError:
             return None
 
-    def find(self, query: Optional[Dict[str, Any]] = None) -> List[Document]:
-        with self.db.transaction() as txn:
+    def find(self, query: Optional[Dict[str, Any]] = None, txn: Optional[Transaction] = None) -> List[Document]:
+        if txn is not None:
             if query is None or not query:
                 return self.db._transaction_manager.get_all_documents(txn, self.name)
-
             plan = self.db._query_optimizer.optimize_query(self.name, query)
             return self.db._query_optimizer.execute_query(txn, plan)
+        with self.db.transaction() as txn_inner:
+            if query is None or not query:
+                return self.db._transaction_manager.get_all_documents(txn_inner, self.name)
 
-    def find_with_plan(self, query: Dict[str, Any]) -> Tuple[List[Document], QueryPlan]:
-        with self.db.transaction() as txn:
+            plan = self.db._query_optimizer.optimize_query(self.name, query)
+            return self.db._query_optimizer.execute_query(txn_inner, plan)
+
+    def find_with_plan(self, query: Dict[str, Any], txn: Optional[Transaction] = None) -> Tuple[List[Document], QueryPlan]:
+        if txn is not None:
             plan = self.db._query_optimizer.optimize_query(self.name, query)
             results = self.db._query_optimizer.execute_query(txn, plan)
             return results, plan
+        with self.db.transaction() as txn_inner:
+            plan = self.db._query_optimizer.optimize_query(self.name, query)
+            results = self.db._query_optimizer.execute_query(txn_inner, plan)
+            return results, plan
 
-    def update_one(self, doc_id: DocumentID, updates: Dict[str, Any]) -> Optional[Document]:
+    def update_one(self, doc_id: DocumentID, updates: Dict[str, Any], txn: Optional[Transaction] = None) -> Optional[Document]:
+        if txn is not None:
+            return self.db._transaction_manager.update_document(
+                txn, self.name, doc_id, updates
+            )
         try:
-            with self.db.transaction() as txn:
+            with self.db.transaction() as txn_inner:
                 doc = self.db._transaction_manager.update_document(
-                    txn, self.name, doc_id, updates
+                    txn_inner, self.name, doc_id, updates
                 )
-                self.db._transaction_manager.commit_transaction(txn)
+                self.db._transaction_manager.commit_transaction(txn_inner)
                 return doc
         except DocumentNotFoundError:
             return None
 
-    def delete_one(self, doc_id: DocumentID) -> bool:
+    def delete_one(self, doc_id: DocumentID, txn: Optional[Transaction] = None) -> bool:
+        if txn is not None:
+            self.db._transaction_manager.delete_document(txn, self.name, doc_id)
+            return True
         try:
-            with self.db.transaction() as txn:
-                self.db._transaction_manager.delete_document(txn, self.name, doc_id)
-                self.db._transaction_manager.commit_transaction(txn)
+            with self.db.transaction() as txn_inner:
+                self.db._transaction_manager.delete_document(txn_inner, self.name, doc_id)
+                self.db._transaction_manager.commit_transaction(txn_inner)
                 return True
         except DocumentNotFoundError:
             return False

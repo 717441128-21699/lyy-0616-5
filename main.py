@@ -9,7 +9,12 @@ import sys
 import shutil
 import json
 
-os.environ['PYTHONIOENCODING'] = 'utf-8'
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 from docdb import DocDB, Config, IsolationLevel
 
@@ -130,19 +135,14 @@ def demo_transactions():
         print("\n--- 转账事务 (A001 -> A002, 500元) ---")
         try:
             with db.transaction(IsolationLevel.REPEATABLE_READ) as txn:
-                all_docs = db._transaction_manager.get_all_documents(txn, "accounts")
-                doc_a = [d for d in all_docs if d.data["account_id"] == "A001"][0]
-                doc_b = [d for d in all_docs if d.data["account_id"] == "A002"][0]
+                doc_a = accounts.find({"account_id": "A001"}, txn=txn)[0]
+                doc_b = accounts.find({"account_id": "A002"}, txn=txn)[0]
 
                 print(f"  读取: A001={doc_a.data['balance']}, A002={doc_b.data['balance']}")
 
                 if doc_a.data["balance"] >= 500:
-                    db._transaction_manager.update_document(
-                        txn, "accounts", doc_a.doc_id, {"balance": doc_a.data["balance"] - 500}
-                    )
-                    db._transaction_manager.update_document(
-                        txn, "accounts", doc_b.doc_id, {"balance": doc_b.data["balance"] + 500}
-                    )
+                    accounts.update_one(doc_a.doc_id, {"balance": doc_a.data["balance"] - 500}, txn=txn)
+                    accounts.update_one(doc_b.doc_id, {"balance": doc_b.data["balance"] + 500}, txn=txn)
                     db.commit(txn)
                     print("  事务提交成功!")
                 else:
@@ -158,11 +158,8 @@ def demo_transactions():
         print("\n--- 事务回滚演示 ---")
         try:
             with db.transaction(IsolationLevel.REPEATABLE_READ) as txn:
-                all_docs = db._transaction_manager.get_all_documents(txn, "accounts")
-                doc = [d for d in all_docs if d.data["account_id"] == "A001"][0]
-                db._transaction_manager.update_document(
-                    txn, "accounts", doc.doc_id, {"balance": 999999}
-                )
+                doc = accounts.find({"account_id": "A001"}, txn=txn)[0]
+                accounts.update_one(doc.doc_id, {"balance": 999999}, txn=txn)
                 print("  修改了余额但未提交...")
                 raise Exception("模拟异常")
         except Exception as e:
@@ -271,7 +268,7 @@ def demo_concurrency():
 
         print("\n--- 锁信息查看 ---")
         with db.transaction(IsolationLevel.REPEATABLE_READ) as txn:
-            doc = db._transaction_manager.read_document(txn, "items", item1.doc_id)
+            doc = items.find_one(item1.doc_id, txn=txn)
             print(f"事务 {txn.txn_id} 读取了资源A")
 
             lock_info = db.get_lock_info()

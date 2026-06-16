@@ -14,7 +14,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from docdb import DocDB, Config, IsolationLevel
-from docdb.common import DocumentNotFoundError, UniqueConstraintViolationError
+from docdb.common import DocumentNotFoundError, UniqueConstraintViolationError, TransactionAbortedError
 
 
 class TestDocDBIntegration(unittest.TestCase):
@@ -100,15 +100,11 @@ class TestDocDBIntegration(unittest.TestCase):
         accounts.insert_one({"account_id": "A2", "balance": 1000})
 
         with self.db.transaction(IsolationLevel.REPEATABLE_READ) as txn:
-            doc_a = accounts.find({"account_id": "A1"})[0]
-            doc_b = accounts.find({"account_id": "A2"})[0]
+            doc_a = accounts.find({"account_id": "A1"}, txn=txn)[0]
+            doc_b = accounts.find({"account_id": "A2"}, txn=txn)[0]
 
-            self.db._transaction_manager.update_document(
-                txn, "accounts", doc_a.doc_id, {"balance": 500}
-            )
-            self.db._transaction_manager.update_document(
-                txn, "accounts", doc_b.doc_id, {"balance": 1500}
-            )
+            accounts.update_one(doc_a.doc_id, {"balance": 500}, txn=txn)
+            accounts.update_one(doc_b.doc_id, {"balance": 1500}, txn=txn)
             self.db.commit(txn)
 
         doc_a = accounts.find({"account_id": "A1"})[0]
@@ -123,9 +119,7 @@ class TestDocDBIntegration(unittest.TestCase):
 
         try:
             with self.db.transaction(IsolationLevel.REPEATABLE_READ) as txn:
-                self.db._transaction_manager.update_document(
-                    txn, "accounts", doc.doc_id, {"balance": 999999}
-                )
+                accounts.update_one(doc.doc_id, {"balance": 999999}, txn=txn)
                 raise Exception("模拟异常")
         except Exception:
             pass
@@ -190,25 +184,31 @@ class TestDocDBIntegration(unittest.TestCase):
         selectivity = explain_low["cost_estimate"]["selectivity"]
         self.assertLess(selectivity, 0.5)
 
-    def test_isolation_levels(self):
-        """测试不同隔离级别"""
+    def test_read_committed_isolation(self):
+        """测试 READ_COMMITTED 隔离级别"""
         users = self.db["users"]
         doc = users.insert_one({"name": "测试", "age": 25})
 
         with self.db.transaction(IsolationLevel.READ_COMMITTED) as txn:
-            d = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            d = users.find_one(doc.doc_id, txn=txn)
             self.assertEqual(d.data["age"], 25)
             self.db.commit(txn)
 
+    def test_repeatable_read_isolation(self):
+        """测试 REPEATABLE_READ 隔离级别"""
+        users = self.db["users"]
+        doc = users.insert_one({"name": "测试", "age": 25})
+
         with self.db.transaction(IsolationLevel.REPEATABLE_READ) as txn:
-            d1 = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
-            self.db._transaction_manager.update_document(txn, "users", doc.doc_id, {"age": 30})
-            d2 = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            d1 = users.find_one(doc.doc_id, txn=txn)
+            self.assertEqual(d1.data["age"], 25)
+            users.update_one(doc.doc_id, {"age": 30}, txn=txn)
+            d2 = users.find_one(doc.doc_id, txn=txn)
             self.assertEqual(d2.data["age"], 30)
             self.db.commit(txn)
 
         with self.db.transaction(IsolationLevel.REPEATABLE_READ) as txn:
-            d3 = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            d3 = users.find_one(doc.doc_id, txn=txn)
             self.assertEqual(d3.data["age"], 30)
             self.db.commit(txn)
 
@@ -218,20 +218,20 @@ class TestDocDBIntegration(unittest.TestCase):
         doc = users.insert_one({"name": "串行化测试", "age": 25})
 
         with self.db.transaction(IsolationLevel.SERIALIZABLE) as txn:
-            d = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            d = users.find_one(doc.doc_id, txn=txn)
             self.assertEqual(d.data["age"], 25)
             self.db.commit(txn)
 
         with self.db.transaction(IsolationLevel.SERIALIZABLE) as txn:
-            d1 = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            d1 = users.find_one(doc.doc_id, txn=txn)
             self.assertEqual(d1.data["age"], 25)
-            d2 = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            d2 = users.find_one(doc.doc_id, txn=txn)
             self.assertEqual(d2.data["age"], 25)
             self.db.commit(txn)
 
         with self.db.transaction(IsolationLevel.SERIALIZABLE) as txn:
-            d = self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
-            self.db._transaction_manager.update_document(txn, "users", doc.doc_id, {"age": 30})
+            d = users.find_one(doc.doc_id, txn=txn)
+            users.update_one(doc.doc_id, {"age": 30}, txn=txn)
             self.db.commit(txn)
 
         doc2 = users.find_one(doc.doc_id)
@@ -239,8 +239,6 @@ class TestDocDBIntegration(unittest.TestCase):
 
     def test_concurrent_transactions(self):
         """测试并发事务"""
-        from docdb.common import TransactionAbortedError
-
         counter = self.db["counter"]
         counter.insert_one({"name": "count", "value": 0})
         success_count = [0]
@@ -253,11 +251,9 @@ class TestDocDBIntegration(unittest.TestCase):
                 for attempt in range(100):
                     try:
                         with self.db.transaction(IsolationLevel.SERIALIZABLE) as txn:
-                            doc = counter.find({"name": "count"})[0]
+                            doc = counter.find({"name": "count"}, txn=txn)[0]
                             new_val = doc.data["value"] + 1
-                            self.db._transaction_manager.update_document(
-                                txn, "counter", doc.doc_id, {"value": new_val}
-                            )
+                            counter.update_one(doc.doc_id, {"value": new_val}, txn=txn)
                             self.db.commit(txn)
                             with success_lock:
                                 success_count[0] += 1
@@ -310,9 +306,7 @@ class TestDocDBIntegration(unittest.TestCase):
 
         with self.assertRaises(DocumentNotFoundError):
             with self.db.transaction() as txn:
-                self.db._transaction_manager.read_document(
-                    txn, "users", "non-existent-id"
-                )
+                users.find_one("non-existent-id", txn=txn)
 
     def test_count_documents(self):
         """测试文档计数"""
@@ -390,7 +384,7 @@ class TestDocDBIntegration(unittest.TestCase):
         doc = users.insert_one({"name": "测试"})
 
         with self.db.transaction() as txn:
-            self.db._transaction_manager.read_document(txn, "users", doc.doc_id)
+            users.find_one(doc.doc_id, txn=txn)
 
             lock_info = self.db.get_lock_info()
             self.assertIsNotNone(lock_info)
